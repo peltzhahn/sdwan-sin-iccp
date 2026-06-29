@@ -5,7 +5,7 @@ Python simulator for the end-to-end communication analysis presented in the pape
 > **Performance Analysis of a Hybrid and Resilient SD-WAN for Mission-Critical Applications in the Brazilian Electric Power Sector**
 > M. P. L. H. Barbosa, M. H. C. Dias, and G. F. C. de Queiroz.
 
-The simulator models the transmission of ICCP (IEC 60870-6) messages from a substation SCADA server to the operator's control center over a Wide Area Network, comparing legacy and SD-WAN architectures (with and without hardware/link replication) under different network degradation conditions.
+The simulator models the transmission of ICCP (IEC 60870-6) messages from a substation SCADA server to the operator's control center over a Wide Area Network, comparing legacy and SD-WAN architectures (with and without hardware replication) under different network degradation conditions.
 
 ---
 
@@ -20,10 +20,10 @@ Four network architectures are compared:
 
 | Code | Architecture |
 |------|--------------|
-| `L`  | Legacy network (OSPF, no replication) |
+| `L`  | Legacy network (no replication) |
 | `L'` | Legacy network with server/link replication |
 | `S`  | Hybrid SD-WAN (no replication) |
-| `S'` | **Proposed**: Hybrid and resilient SD-WAN (with replication) |
+| `S'` | Hybrid SD-WAN (with replication) |
 
 Two transmission paths are considered: **C1** (substation → operator, direct) and **C2** (substation → agent → operator).
 
