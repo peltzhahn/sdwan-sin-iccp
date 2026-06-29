@@ -1,0 +1,958 @@
+# coding: utf-8
+
+import math
+import random
+import sys
+import numpy as np
+import networkx as nx
+import copy
+import scipy.stats as st
+
+# =================================================================
+# --- PARÂMETROS GERAIS ---
+# =================================================================
+
+# =================================================================
+# --- SELECAO DE CENARIO (A, B ou C) ---
+
+# =================================================================
+CENARIO = sys.argv[1].upper() if len(sys.argv) > 1 else "A"
+
+SCENARIOS = {
+    #        NUM_RODADAS  TAXA_PERDA_LR   FAIL_DURATION   BER (lr_wan)
+    "A": {"NUM_RODADAS": 5000, "TAXA_PERDA_LR": 10**(-4), "FAIL_DURATION": 5.0,  "BER_WAN": 10**(-9)},
+    "B": {"NUM_RODADAS": 5000, "TAXA_PERDA_LR": 10**(-3), "FAIL_DURATION": 10.0, "BER_WAN": 10**(-7)},
+    "C": {"NUM_RODADAS": 5000, "TAXA_PERDA_LR": 10**(-2), "FAIL_DURATION": 15.0, "BER_WAN": 10**(-5)},
+}
+if CENARIO not in SCENARIOS:
+    print(f"Cenario invalido: {CENARIO}. Use A, B ou C.")
+    sys.exit(1)
+_SC = SCENARIOS[CENARIO]
+BER_WAN = _SC["BER_WAN"]
+print(f">>> Executando cenario: {CENARIO}")
+
+NUM_RODADAS = _SC["NUM_RODADAS"]
+REQLAT_MAX = 0.5
+TAXA_PERDA_LR = _SC["TAXA_PERDA_LR"]
+BITS_MIN = 100 * 8
+BITS_MAX = 1500 * 8
+MAX_FAIL_CHECKS = 10000
+FAIL_DURATION = _SC["FAIL_DURATION"]
+lan_lat = 1.0 # ms, latência da LAN
+
+# Variáveis Globais de Monitoramento
+total_packets_sent_simulada = 0
+total_packets_lost_simulada = 0
+black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+man_fail_active_until = 0.0
+
+# =================================================================
+# --- TOPOLOGIA COMPLETA (RNP & ONS) ---
+# =================================================================
+
+class TopologyGenerator():
+    def __init__(self):
+        self.network = nx.Graph()
+        self.nrDCLocations = 0
+
+    def generateNetwork(self, name):
+        self.network = nx.Graph()
+        self.nrDCLocations = 0
+        if (name == "ONS"):
+            return self.__generateONS()
+        elif (name == "rnp"):
+            return self.__generateRNP()
+        else:
+            return False, False
+
+    def __generateONS(self):
+        self.network.add_node("dc_rjo",type="dcLocation")
+        self.network.add_node("dc_bsb",type="dcLocation")
+        self.network.add_node("dc_fln",type="dcLocation")
+        self.network.add_node("dc_rec",type="dcLocation")
+        self.network.add_edge("dc_rjo", "dc_bsb", weight=1200, bandwidth=10000)
+        self.network.add_edge("dc_rjo", "dc_fln", weight=900, bandwidth=10000)
+        self.network.add_edge("dc_rjo", "dc_rec", weight=2300, bandwidth=10000)
+        self.network.add_edge("dc_bsb", "dc_fln", weight=1500, bandwidth=10000)
+        self.network.add_edge("dc_fln", "dc_rec", weight=3300, bandwidth=10000)
+        self.network.add_edge("dc_bsb", "dc_rec", weight=1900, bandwidth=10000)
+        self.nrDCLocations = 4
+        return self.network, self.nrDCLocations
+
+    def __generateRNP(self):
+        # Nós
+        rnp_nodes_list = ["AC", "RO", "MT", "MS", "PR", "RS", "SC", "SP", "RJ", "ES", "MG", "DF", "GO", "TO", "AM", "RR", "AP", "PA", "MA", "CE", "PI", "RN", "PB_CGE", "PE", "AL", "SE", "BA", "PB_JPA"]
+        for n in rnp_nodes_list:
+            self.network.add_node(n, type="dcLocation")
+
+        # Arestas (Topologia Completa restaurada) - Bandwidth em Mbps
+        self.network.add_edge('AC', 'RO', weight=444, bandwidth=99629.17)
+        self.network.add_edge('AL', 'PE', weight=202, bandwidth=97820.0)
+        self.network.add_edge('SE', 'AL', weight=202, bandwidth=97600.0)
+        self.network.add_edge('RR', 'AM', weight=653, bandwidth=99641.03)
+        self.network.add_edge('AM', 'DF', weight=1930, bandwidth=1915.82)
+        self.network.add_edge('AM', 'AP', weight=2871, bandwidth=198966.49)
+        self.network.add_edge('PA', 'AP', weight=329, bandwidth=98130.0)
+        self.network.add_edge('ES', 'BA', weight=832, bandwidth=94120.0)
+        self.network.add_edge('BA', 'SE', weight=277, bandwidth=96760.0)
+        self.network.add_edge('MG', 'BA', weight=961, bandwidth=87220.0)
+        self.network.add_edge('DF', 'BA', weight=1494, bandwidth=96060.0)
+        self.network.add_edge('CE', 'BA', weight=1177, bandwidth=93670.0)
+        self.network.add_edge('BA', 'PB_CGE', weight=880, bandwidth=34030.0)
+        self.network.add_edge('RR', 'CE', weight=2567, bandwidth=665.16)
+        self.network.add_edge('RN', 'CE', weight=433, bandwidth=94010.0)
+        self.network.add_edge('PI', 'BA', weight=1150, bandwidth=99775.74)
+        self.network.add_edge('DF', 'CE', weight=1680, bandwidth=8410.0)
+        self.network.add_edge('DF', 'GO', weight=175, bandwidth=15840.0)
+        self.network.add_edge('CE', 'SP', weight=2865, bandwidth=294360.0)
+        self.network.add_edge('DF', 'MG', weight=628, bandwidth=94010.0)
+        self.network.add_edge('MT', 'DF', weight=1318, bandwidth=98975.77)
+        self.network.add_edge('DF', 'TO', weight=850, bandwidth=196620.0)
+        self.network.add_edge('DF', 'MA', weight=1850, bandwidth=98290.0)
+        self.network.add_edge('DF', 'SP', weight=1017, bandwidth=13020.0)
+        self.network.add_edge('MG', 'ES', weight=588, bandwidth=9621.99)
+        self.network.add_edge('RJ', 'ES', weight=413, bandwidth=93080.0)
+        self.network.add_edge('GO', 'MT', weight=740, bandwidth=9342.57)
+        self.network.add_edge('MS', 'GO', weight=840, bandwidth=9086.07)
+        self.network.add_edge('MA', 'PA', weight=482, bandwidth=9682.89)
+        self.network.add_edge('PI', 'MA', weight=400, bandwidth=99024.43)
+        self.network.add_edge('SP', 'MG', weight=490, bandwidth=90170.0)
+        self.network.add_edge('MG', 'RJ', weight=445, bandwidth=198130.0)
+        self.network.add_edge('MS', 'PR', weight=779, bandwidth=7860.0)
+        self.network.add_edge('MT', 'MS', weight=558, bandwidth=99921.71)
+        self.network.add_edge('RO', 'MT', weight=1139, bandwidth=98948.23)
+        self.network.add_edge('TO', 'PA', weight=1200, bandwidth=97460.0)
+        self.network.add_edge('PB_CGE', 'PB_JPA', weight=115, bandwidth=9414.82)
+        self.network.add_edge('RN', 'PB_CGE', weight=199, bandwidth=93950.0)
+        self.network.add_edge('PE', 'PB_CGE', weight=141, bandwidth=90810.0)
+        self.network.add_edge('PR', 'RS', weight=543, bandwidth=197020.0)
+        self.network.add_edge('SC', 'PR', weight=304, bandwidth=197330.0)
+        self.network.add_edge('SP', 'RJ', weight=360, bandwidth=189850.0)
+        self.network.add_edge('PB_JPA', 'PE', weight=125, bandwidth=9695.05)
+        self.network.add_edge('RS', 'SC', weight=375, bandwidth=98200.0)
+        self.network.add_edge('RS', 'SP', weight=1119, bandwidth=93470.0)
+        self.network.add_edge('SC', 'SP', weight=487, bandwidth=96170.0)
+        self.network.add_edge('CE', 'PI', weight=654, bandwidth=97230.0)
+        self.network.add_edge('SP', 'PR', weight=334, bandwidth=293900.0)
+        self.network.add_edge('AC', 'RO', weight=444, bandwidth=99629.17)
+
+        self.nrDCLocations = 28
+        return self.network, self.nrDCLocations
+
+rnp_nodes = ["AC", "RO", "MT", "MS", "PR", "RS", "SC", "SP", "RJ", "ES", "MG", "DF", "GO", "TO", "AM", "RR", "AP", "PA", "MA", "CE", "PI", "RN", "PB_CGE", "PE", "AL", "SE", "BA", "PB_JPA"]
+ONS_CAPITALS = ["RJ", "SC", "DF", "PE"]
+
+# =================================================================
+# --- AUXILIARES DE CAMINHO ---
+# =================================================================
+
+def gerar_caminho_wan_k(gerador_topologia, nome_rede, node_origem, node_destino, bits_msg_default, k=1):
+    network, _ = gerador_topologia.generateNetwork(nome_rede)
+    try:
+        paths_generator = nx.shortest_simple_paths(network, source=node_origem, target=node_destino, weight='weight')
+        path_nodes = []
+        for i, path in enumerate(paths_generator):
+            if i == k - 1:
+                path_nodes = path
+                break
+        if not path_nodes: return [], None
+        print(path_nodes)
+    except: return [], None
+
+    caminho_links = []
+    lr_wan = BER_WAN
+
+    for i in range(len(path_nodes) - 1):
+        u = path_nodes[i]
+        v = path_nodes[i+1]
+        edge_data = network.get_edge_data(u, v)
+        if edge_data:
+            distance_km = edge_data['weight']
+            # Propagação usa velocidade da luz no vácuo (300 km/ms)
+            latencia_prop_ms = distance_km / 300.0 
+            
+            
+            bw_mbps = edge_data['bandwidth'] 
+            
+            caminho_links.append((u, v, bits_msg_default, bw_mbps, latencia_prop_ms, lr_wan))
+
+    return caminho_links, network.get_edge_data
+
+def gerar_caminho_wan(gerador, nome, orig, dest, bits):
+    return gerar_caminho_wan_k(gerador, nome, orig, dest, bits, k=1)
+
+def get_latency_to_controller(node_origem, node_controller):
+    if node_origem == node_controller: return 0.0
+    tg_temp = TopologyGenerator()
+    network, _ = tg_temp.generateNetwork("rnp")
+    try:
+        dist_km = nx.shortest_path_length(network, source=node_origem, target=node_controller, weight='weight')
+        latencia_ms = dist_km / 300.0
+        return latencia_ms / 1000.0
+    except: return 0.05
+
+# =================================================================
+# --- CALIBRAÇÃO (RTT & TIMEOUT) ---
+# =================================================================
+
+def realizar_calibracao_rtt(tg, rodadas=100):
+    print(f"\n[CALIBRAÇÃO] Iniciando {rodadas} rodadas (pares aleatórios) para cálculo do Timeout...")
+    amostras_rtt = []
+    
+    global rnp_nodes
+    global lan_lat
+    global BITS_MIN
+    global BITS_MAX
+
+    network_calib, _ = tg.generateNetwork("rnp")
+
+    def get_node_bw_mbps(node_name, network_obj):
+        edges = network_obj.edges(node_name, data=True)
+        if not edges: return 0
+        bws_mbps = [data['bandwidth'] for _, _, data in edges]
+        return max(bws_mbps)
+
+    for _ in range(rodadas):
+        bits_calib = random.randint(BITS_MIN, BITS_MAX)
+        try:
+            node_origem, node_destino = random.sample(rnp_nodes, 2)
+        except ValueError:
+            continue 
+
+        path, _ = gerar_caminho_wan(tg, "rnp", node_origem, node_destino, bits_calib)
+        if not path: continue 
+
+        lan_bw_origem = get_node_bw_mbps(node_origem, network_calib)
+        lan_bw_destino = get_node_bw_mbps(node_destino, network_calib)
+
+        tempo_total = 0.0
+        tempo_total += (bits_calib/(lan_bw_origem*1e6)) + (lan_lat/1000.)
+        for _, _, bits, bw, lat, _ in path:
+            tempo_total += (bits/(bw*1e6)) + (lat/1000.)
+        tempo_total += (bits_calib/(lan_bw_destino*1e6)) + (lan_lat/1000.)
+
+        rtt = tempo_total * 2
+        amostras_rtt.append(rtt)
+
+    if not amostras_rtt: return 0.5
+    avg_rtt = np.mean(amostras_rtt)
+    dev_rtt = np.std(amostras_rtt)
+    int_to = avg_rtt + (4 * dev_rtt)
+
+    print(f"  > Amostras válidas: {len(amostras_rtt)}")
+    print(f"  > RTT Médio (Global): {avg_rtt*1000:.2f} ms | Desvio: {dev_rtt*1000:.2f} ms")
+    print(f"  > Timeout Calculado (IntTO): {int_to*1000:.2f} ms")
+    return int_to, avg_rtt
+
+# =================================================================
+# --- FUNÇÕES DE SIMULAÇÃO (VERBOSAS + TRACE VISUAL) ---
+# =================================================================
+
+def simular_tradicional(links, reqlat, eventos_perda, int_to, verbose=False):
+    global black_hole_state, total_packets_sent_simulada, total_packets_lost_simulada
+
+    acumulado = [0, 0, False, 0.0]
+    l = 0
+    perda_idx = 0
+    tempo_viagem_pacote = 0.0
+
+    if verbose: print(f"[TRAD] Iniciando transmissão. Timeout TCP: {int_to*1000:.0f}ms")
+
+    while (l < len(links)):
+        u, v, bits, bw, lat_prop_ms, lr = links[l]
+        atraso_tx = bits / (bw * (10**6))
+        atraso_prop = lat_prop_ms / 1000.
+        passo = atraso_tx + atraso_prop
+        momento_chegada_destino_link = acumulado[0] + tempo_viagem_pacote + passo
+
+        if perda_idx >= len(eventos_perda): break
+        
+        is_lan_man = (lr == TAXA_PERDA_LR)
+        perda_detectada = False
+        motivo = ""
+
+        link_esta_quebrado = (u == black_hole_state['u'] and v == black_hole_state['v'])
+        dentro_janela_tempo = (momento_chegada_destino_link < black_hole_state['active_until'])
+
+        if link_esta_quebrado and dentro_janela_tempo and is_lan_man:
+            perda_detectada = True
+            motivo = f"Buraco Negro Ativo (Físico em {u}->{v})"
+        elif eventos_perda[perda_idx] <= lr:
+            perda_detectada = True
+            motivo = "Erro de Bit"
+            if is_lan_man and momento_chegada_destino_link >= black_hole_state['active_until']:
+                black_hole_state['u'] = u
+                black_hole_state['v'] = v
+                black_hole_state['active_until'] = momento_chegada_destino_link + FAIL_DURATION
+                motivo = "NOVA FALHA DE ROTA -> Erro de Roteamento"
+
+        total_packets_sent_simulada += 1
+
+        if verbose:
+            log_msg = f"  > {u}->{v} | T_sim: {momento_chegada_destino_link:.4f}s"
+            if perda_detectada: print(f"{log_msg} [FALHA: {motivo}]")
+            else: print(f"{log_msg} [OK]")
+
+        if perda_detectada:
+            acumulado[1] += 1
+            total_packets_lost_simulada += 1
+            tempo_espera = int_to
+
+            tempo_perdido_nesta_falha = tempo_espera + tempo_viagem_pacote
+            acumulado[3] += tempo_perdido_nesta_falha
+
+            acumulado[0] += tempo_espera
+            # TRADICIONAL: Soma o tempo gasto na viagem falha
+            acumulado[0] += tempo_viagem_pacote 
+            
+            if verbose: print(f"    [!] Aguardando Timeout (+{tempo_espera:.4f}s) para retransmitir...")
+            l = 0
+            tempo_viagem_pacote = 0.0
+        else:
+            tempo_viagem_pacote += passo
+            l += 1
+        perda_idx += 1
+
+    acumulado[0] += tempo_viagem_pacote
+    if (acumulado[0] >= reqlat): acumulado[2] = True
+    if verbose: print(f"[FIM TRAD] Tempo Total: {acumulado[0]:.4f}s | Perdas: {acumulado[1]}")
+    return acumulado
+
+# --- FUNÇÃO SDN  ---
+def simular_sdn(links, reqlat, eventos_perda, lat_ctrl, int_to, verbose=False):
+    global total_packets_sent_simulada, total_packets_lost_simulada
+
+    acumulado = [0, 0, False, 0.0] 
+    no_destino_final = links[-1][1]
+    
+    # Setup Visual
+    if verbose: print(f"[SDN] Iniciando transmissão (Controller Latency: {lat_ctrl*1000:.1f}ms)...")
+
+    rota_atual = list(links)
+    l = 0
+    perda_idx = 0
+    tempo_viagem_neste_trecho = 0.0
+
+    while (l < len(rota_atual)):
+        u, v, bits, bw, lat_prop_ms, lr = rota_atual[l]
+        passo = (bits / (bw * 1e6)) + (lat_prop_ms / 1000.)
+        
+        # Momento em que o pacote CHEGARIA ao final deste link
+        momento_atual = acumulado[0] + tempo_viagem_neste_trecho + passo
+
+        if perda_idx >= len(eventos_perda): break
+        
+        is_physical_fail = (lr == TAXA_PERDA_LR) 
+        prefixes_lan = ('serv', 'fw', 'gate', 'sw', 'core')
+        eh_lan = u.startswith(prefixes_lan) or v.startswith(prefixes_lan)
+        perda = False
+
+        if eventos_perda[perda_idx] <= lr:
+            if eh_lan and is_physical_fail:
+                perda = False # LAN protegida
+            else:
+                perda = True 
+
+            if perda:
+                # === CENÁRIO 1: FALHA FÍSICA NA WAN  ===
+                if is_physical_fail and not eh_lan:
+                    tempo_ida = lat_ctrl
+                    tempo_volta = lat_ctrl
+                    penalidade = tempo_ida + tempo_volta
+                    
+                    acumulado[3] += penalidade                    
+
+                    acumulado[0] += penalidade
+                    
+                    if verbose: print(f"  [SDN] FALHA FÍSICA em {u}->{v}. Reroteando (+{penalidade:.4f}s)...")
+                    
+                    
+                    novos_links, _ = gerar_caminho_wan_k(tg, "rnp", u, no_destino_final, bits, k=2)
+                    
+                    if not novos_links:
+                        if verbose: print(f"  [SDN]  Rede sem rota possível. Retransmitindo e aguardando Fail Duration")
+
+                        tempo_perdido_fatal = FAIL_DURATION + tempo_viagem_neste_trecho
+                        acumulado[3] += tempo_perdido_fatal
+
+                        acumulado[0] += FAIL_DURATION
+                        acumulado[0] += tempo_viagem_neste_trecho # Soma viagem perdida
+                        acumulado[1] += 1
+                        total_packets_lost_simulada += 1
+                        l = 0 
+                        tempo_viagem_neste_trecho = 0.0
+                        
+                        perda_idx += 1
+                        continue
+                    
+                    if verbose: print(f"  [SDN] Nova rota encontrada! Continuando...")
+                    
+                    
+                    rota_atual = novos_links 
+                    
+                    
+                    acumulado[0] += tempo_viagem_neste_trecho
+                    
+                    tempo_viagem_neste_trecho = 0.0
+                    l = 0 # Reinicia índice para a NOVA rota
+                    perda_idx += 1 
+                    continue 
+
+                # === CENÁRIO 2: ERRO DE BIT (RETRANSMIT) ===
+                else:
+                    tipo_erro = "Bit Error LAN" if eh_lan else "Bit Error WAN"
+                    if verbose: print(f"  [SDN] {tipo_erro} em {u}->{v}. Retransmitindo (+{int_to:.4f}s)...")
+
+                    tempo_perdido_erro = int_to + tempo_viagem_neste_trecho
+                    acumulado[3] += tempo_perdido_erro
+                    
+                    acumulado[0] += int_to
+                    
+                    acumulado[0] += tempo_viagem_neste_trecho 
+                    
+                    acumulado[1] += 1
+                    total_packets_lost_simulada += 1
+                    
+                    l = 0 # Volta para o início
+                    tempo_viagem_neste_trecho = 0.0
+
+        if not perda:
+            tempo_viagem_neste_trecho += passo
+            
+            if verbose: 
+                print(f"  > {u}->{v} | T_sim: {acumulado[0] + tempo_viagem_neste_trecho:.4f}s [OK]")
+            l += 1
+            
+        perda_idx += 1
+        total_packets_sent_simulada += 1
+
+    acumulado[0] += tempo_viagem_neste_trecho
+    if (acumulado[0] >= reqlat): acumulado[2] = True
+
+    if verbose: print(f"[FIM SDN] Tempo Total: {acumulado[0]:.4f}s | Perdas: {acumulado[1]}")
+    return acumulado
+
+# --- FUNÇÃO REPLICAÇÃO ---
+def simular_com_replicacao(tg, nome_rede, links_pri, links_sec, reqlat, eventos_A, eventos_B, modo, lat_ctrl, int_to, verbose=False):
+    global black_hole_state, total_packets_lost_simulada
+
+    bh_state_A = copy.deepcopy(black_hole_state)
+    bh_state_B = copy.deepcopy(black_hole_state)
+
+    acc_A = [0, 0, False, False, 0.0] 
+    acc_B = [0, 0, False, False, 0.0]
+    viagem_A = 0.0; viagem_B = 0.0
+
+    dest_final_A = links_pri[-1][1]
+    dest_final_B = links_sec[-1][1]
+
+    prefixes_lan = ('serv', 'fw', 'gate', 'sw', 'core')
+
+    if verbose: 
+        print(f"[{modo} + RES] Corrida iniciada. (A: Primário | B: Secundário)")
+
+    l_A, l_B = 0, 0
+    perda_idx = 0
+    idx_B = 0
+
+    while (not acc_A[3] or not acc_B[3]):
+        
+
+        # --- CAMINHO A ---
+        if not acc_A[3]:
+            if perda_idx >= len(eventos_A): acc_A[3] = True; continue
+            u, v, bits, bw, lat, lr = links_pri[l_A]
+            passo = (bits/(bw*1e6)) + (lat/1000.)
+            t_chegada = acc_A[0] + viagem_A + passo
+            is_lm = (lr == TAXA_PERDA_LR)
+            perda = False
+            msg_fail = ""
+ 
+            eh_lan = u.startswith(prefixes_lan) or v.startswith(prefixes_lan)
+
+            if modo == "TRAD":
+                link_broken = (u == bh_state_A['u'] and v == bh_state_A['v'])
+                in_time = (t_chegada < bh_state_A['active_until'])
+                if link_broken and in_time and is_lm:
+                    perda = True; msg_fail = "Buraco Negro"
+                elif eventos_A[perda_idx] <= lr:
+                    perda = True; msg_fail = "Erro"
+                    if is_lm and t_chegada >= bh_state_A['active_until']:
+                        bh_state_A['u'] = u; bh_state_A['v'] = v
+                        bh_state_A['active_until'] = t_chegada + FAIL_DURATION
+                
+                if perda:
+                    acc_A[1] += 1; total_packets_lost_simulada += 1
+
+                    tempo_perdido = int_to + viagem_A
+                    acc_A[4] += tempo_perdido
+
+                    acc_A[0] += int_to
+                    acc_A[0] += viagem_A 
+                    viagem_A = 0.0; l_A = 0 
+                    if verbose: print(f"  [A] FALHA {u}->{v} ({msg_fail}). Timeout...")
+
+            else: # SDN
+                if eventos_A[perda_idx] <= lr:
+                    if is_lm and eh_lan:
+                        perda = False
+                    else:
+                        perda = True
+                        acc_A[1] += 1
+
+                    if perda:
+                        if is_lm: 
+
+                            penalidade_ctrl = (2 * lat_ctrl)
+                            acc_A[4] += penalidade_ctrl
+
+                            acc_A[0] += (2 * lat_ctrl)
+                            if verbose: print(f"  [A] SDN: Queda em {u}->{v}. Recalculando...")
+                            nova_rota, _ = gerar_caminho_wan_k(tg, nome_rede, u, dest_final_A, bits, k=2)
+                            if nova_rota:
+                                links_pri = nova_rota
+                                acc_A[0] += viagem_A 
+                                l_A = 0; viagem_A = 0.0
+                                if verbose: print(f"  [A] Nova rota com {len(links_pri)} saltos.")
+                            
+                            else:
+                                msg_fail = "Rede sem rota possível. Retransmitindo e aguardando Fail Duration";
+
+                                tempo_fatal = FAIL_DURATION + viagem_A
+                                acc_A[4] += tempo_fatal
+
+                                acc_A[0] += FAIL_DURATION
+                                acc_A[0] += viagem_A # Soma tempo perdido
+                                viagem_A = 0.0; l_A = 0
+                                if verbose: print(f"  [A] FALHA {u}->{v} ({msg_fail}).")
+                        else:
+                            msg_fail = "Bit Error"; 
+
+                            tempo_perdido = int_to + viagem_A
+                            acc_A[4] += tempo_perdido
+
+                            acc_A[0] += int_to
+                            acc_A[0] += viagem_A # Soma tempo perdido
+                            viagem_A = 0.0; l_A = 0 
+                            if verbose: print(f"  [A] FALHA {u}->{v} ({msg_fail}).")
+
+            if not perda:
+                viagem_A += passo
+                if verbose: print(f"  [A] {u}->{v} [OK] | T_sim: {acc_A[0] + viagem_A:.4f}s")
+                l_A += 1
+                if l_A == len(links_pri): acc_A[3] = True; acc_A[0] += viagem_A
+
+            perda_idx += 1
+
+        # --- CAMINHO B ---
+        if not acc_B[3]:
+            if idx_B >= len(eventos_B): acc_B[3] = True; continue
+            u, v, bits, bw, lat, lr = links_sec[l_B]
+            passo = (bits/(bw*1e6)) + (lat/1000.)
+            t_chegada = acc_B[0] + viagem_B + passo
+            is_lm = (lr == TAXA_PERDA_LR)
+            perda = False
+            msg_fail = ""
+
+            eh_lan = u.startswith(prefixes_lan) or v.startswith(prefixes_lan)
+
+            if modo == "TRAD":
+                fail_A = (u == bh_state_A['u'] and v == bh_state_A['v']) and (t_chegada < bh_state_A['active_until'])
+                fail_B = (u == bh_state_B['u'] and v == bh_state_B['v']) and (t_chegada < bh_state_B['active_until'])
+                if (fail_A or fail_B) and is_lm:
+                    perda = True; msg_fail = "Buraco Negro"
+                elif eventos_B[idx_B] <= lr:
+                    perda = True; msg_fail = "Erro"
+                    if is_lm and t_chegada >= bh_state_B['active_until']:
+                        bh_state_B['u'] = u; bh_state_B['v'] = v
+                        bh_state_B['active_until'] = t_chegada + FAIL_DURATION
+                
+                if perda:
+                    acc_B[1] += 1; total_packets_lost_simulada += 1
+
+                    tempo_perdido = int_to + viagem_B
+                    acc_B[4] += tempo_perdido
+
+                    acc_B[0] += int_to
+                    acc_B[0] += viagem_B 
+                    viagem_B = 0.0; l_B = 0
+                    if verbose: print(f"  [B] FALHA {u}->{v} ({msg_fail}). Timeout...")
+
+            else: # SDN
+                if eventos_B[idx_B] <= lr:
+                    if is_lm and eh_lan:
+                        perda = False
+                    else:
+                        perda = True
+                        acc_B[1] += 1
+                    
+                    if perda:
+                        if is_lm:
+
+                            penalidade_ctrl = (2 * lat_ctrl)
+                            acc_B[4] += penalidade_ctrl
+ 
+                            acc_B[0] += (2 * lat_ctrl)
+                            if verbose: print(f"  [B] SDN: Queda em {u}->{v}. Recalculando...")
+                            nova_rota, _ = gerar_caminho_wan_k(tg, nome_rede, u, dest_final_B, bits, k=2)
+                            if nova_rota:
+                                links_sec = nova_rota
+                                acc_B[0] += viagem_B
+                                l_B = 0; viagem_B = 0.0
+                                if verbose: print(f"  [B] Nova rota com {len(links_sec)} saltos.")
+                            else:
+                                msg_fail = "Rede sem rota possível. Retransmitindo e aguardando Fail Duration";
+
+                                tempo_fatal = FAIL_DURATION + viagem_B
+                                acc_B[4] += tempo_fatal
+ 
+                                acc_B[0] += FAIL_DURATION
+                                acc_B[0] += viagem_B
+                                viagem_B = 0.0; l_B = 0 
+                                if verbose: print(f"  [B] FALHA {u}->{v} ({msg_fail}).")
+                        else:
+                            msg_fail = "Bit Error";
+
+                            tempo_perdido = int_to + viagem_B
+                            acc_B[4] += tempo_perdido
+
+                            acc_B[0] += int_to
+                            acc_B[0] += viagem_B
+                            viagem_B = 0.0; l_B = 0
+                            if verbose: print(f"  [B] FALHA {u}->{v} ({msg_fail}).")
+
+            if not perda:
+                viagem_B += passo
+                if verbose: print(f"  [B] {u}->{v} [OK] | T_sim: {acc_B[0] + viagem_B:.4f}s")
+                l_B += 1
+                if l_B == len(links_sec): acc_B[3] = True; acc_B[0] += viagem_B
+            
+            idx_B += 1
+
+    if acc_A[3] and acc_B[3]:
+        winner = "A" if acc_A[0] <= acc_B[0] else "B"
+        res = acc_A if winner == "A" else acc_B
+    elif acc_A[3]: winner = "A"; res = acc_A
+    elif acc_B[3]: winner = "B"; res = acc_B
+    else: return [max(acc_A[0], acc_B[0]), max(acc_A[1], acc_B[1]), True, max(acc_A[4], acc_B[4])]
+
+    # --- PRINT FINAL COMPARATIVO ---
+    if verbose:
+        time_a_str = f"{acc_A[0]:.4f}s" if acc_A[3] else "N/A"
+        time_b_str = f"{acc_B[0]:.4f}s" if acc_B[3] else "N/A"
+        print(f"[FIM RES] Vencedor: {winner} | Tempo: {res[0]:.4f}s | (A: {time_a_str} vs B: {time_b_str})")
+        
+    return [res[0], res[1], res[0] >= reqlat, res[4]]
+
+# Wrappers ATUALIZADOS
+def simular_replicacao_tradicional(links_pri, links_sec, reqlat, eventos_A, eventos_B, int_to, verbose=False):
+    return simular_com_replicacao(tg, "rnp", links_pri, links_sec, reqlat, eventos_A, eventos_B, "TRAD", 0, int_to, verbose)
+
+def simular_replicacao_sdn(links_pri, links_sec, reqlat, eventos_A, eventos_B, lat_ctrl, int_to, verbose=False):
+    return simular_com_replicacao(tg, "rnp", links_pri, links_sec, reqlat, eventos_A, eventos_B, "SDN", lat_ctrl, int_to, verbose)
+
+def calcular_placement_poco():
+    return "DF", "dc_bsb"
+
+# =================================================================
+# --- MAIN ---
+# =================================================================
+
+tg = TopologyGenerator()
+
+# Calibração Inicial
+GLOBAL_INT_TO, GLOBAL_RTT_MEDIO = realizar_calibracao_rtt(tg, rodadas=100)
+# Definições de Nós Lógicos
+path1_pre = ['serv_se','fw_se','gate_se']
+path1_pos = ['rot_ag','serv_ag']
+path1r_sec_pos = ['rot_ag_sec','serv_ag_sec']
+
+path2_serv_pri = ['serv_ag','rot_ag']
+path2_serv_sec = ['serv_ag_sec','rot_ag_sec']
+path2_pos_pri = ['rot_ons','core_ons','fw_ons','sw_ons','serv_ons']
+path2r_pos_sec = ['rot_ons_sar','core_ons_sar','fw_ons_sar','sw_ons_sar','serv_ons_sar']
+
+path3_pre = ['serv_se','fw_se','gate_se']
+path3_pos_pri = ['rot_ons','core_ons','fw_ons','sw_ons','serv_ons']
+path3r_sec_pos = ['rot_ons_sar','core_ons_sar','fw_ons_sar','sw_ons_sar','serv_ons_sar']
+
+c = 0
+res_p1 = {"Trad": [], "Trad_Res": [], "SDN": [], "SDN_Res": []}
+res_p2 = {"Trad": [], "Trad_Res": [], "SDN": [], "SDN_Res": []}
+res_p3 = {"Trad": [], "Trad_Res": [], "SDN": [], "SDN_Res": []}
+res_p4 = {"Trad": [], "Trad_Res": [], "SDN": [], "SDN_Res": []}
+
+lan_man_properties = {}
+wan_dict = {}
+
+def gerar_link_propriedades(u, v, bits_msg, lr_local):
+    key = (u, v)
+    if key in wan_dict:
+        bw, lat, lr = wan_dict[key]
+        return (u, v, bits_msg, bw, lat, lr)
+    if key not in lan_man_properties:
+        if u.startswith('serv') or u.startswith('fw') or u.startswith('sw') or u.startswith('core'):
+            bw = random.uniform(1000, 10000); lat = random.uniform(1, 2)
+        else:
+            bw = random.uniform(1000, 10000); lat = random.uniform(2, 10)
+        lan_man_properties[key] = (bw, lat, lr_local)
+    bw, lat, lr = lan_man_properties[key]
+    return (u, v, bits_msg, bw, lat, lr)
+
+def map_wan(path, ini, fim):
+    if not path: return ini + fim
+    for u, v, _, bw, lat, lr_wan in path: wan_dict[(u, v)] = (bw, lat, lr_wan)
+    return ini + [link[0] for link in path] + [path[-1][1]] + fim
+
+while(c < NUM_RODADAS):
+    lan_man_properties = {}
+    wan_dict = {}
+    man_fail_active_until = 0.0
+
+    try:
+        node_ons, node_ons_sec = random.sample(ONS_CAPITALS, 2)
+        available = [n for n in rnp_nodes if n != node_ons and n != node_ons_sec]
+        node_se, node_ag = random.sample(available, 2)
+    except: c+=1; continue
+
+    ctrl_rnp, ctrl_ons = calcular_placement_poco()
+    lat_se_ctrl = get_latency_to_controller(node_se, ctrl_rnp)
+    lat_ag_ctrl = get_latency_to_controller(node_ag, ctrl_rnp)
+
+    print(f"\n####################################################################")
+    print(f"RODADA {c+1}")
+    print(f"Topologia Operacional:")
+    print(f"  - SE: {node_se} | AG: {node_ag}")
+    print(f"  - ONS Pri: {node_ons} | ONS Sec: {node_ons_sec}")
+    print(f"  - Controlador ONS: {ctrl_ons}")
+    print(f"  - Controlador RNP: {ctrl_rnp}")
+    print(f"####################################################################")
+
+
+    bits_se = random.randint(BITS_MIN, BITS_MAX)
+    bits_ag = random.randint(BITS_MIN, BITS_MAX)
+    lr = TAXA_PERDA_LR
+
+    # --- PATH 1 (SE -> AG) ---
+    wan_p1, _ = gerar_caminho_wan(tg, "rnp", node_se, node_ag, bits_se)
+    wan_p1r, _ = gerar_caminho_wan_k(tg, "rnp", node_se, node_ag, bits_se, k=2)
+    links1 = []; [links1.append(gerar_link_propriedades(u,v,bits_se,lr)) for u,v in zip(map_wan(wan_p1,path1_pre,path1_pos), map_wan(wan_p1,path1_pre,path1_pos)[1:]) if gerar_link_propriedades(u,v,bits_se,lr)]
+    links1r = []; [links1r.append(gerar_link_propriedades(u,v,bits_se,lr)) for u,v in zip(map_wan(wan_p1r,path1_pre,path1r_sec_pos), map_wan(wan_p1r,path1_pre,path1r_sec_pos)[1:]) if gerar_link_propriedades(u,v,bits_se,lr)]
+
+    # --- PATH 2 (AG -> ONS) ---
+    wan_p2, _ = gerar_caminho_wan(tg, "rnp", node_ag, node_ons, bits_ag)
+    wan_p2r, _ = gerar_caminho_wan_k(tg, "rnp", node_ag, node_ons_sec, bits_ag, k=2)
+    links2 = []; [links2.append(gerar_link_propriedades(u,v,bits_ag,lr)) for u,v in zip(map_wan(wan_p2,path2_serv_pri,path2_pos_pri), map_wan(wan_p2,path2_serv_pri,path2_pos_pri)[1:]) if gerar_link_propriedades(u,v,bits_ag,lr)]
+    links2r = []; [links2r.append(gerar_link_propriedades(u,v,bits_ag,lr)) for u,v in zip(map_wan(wan_p2r,path2_serv_sec,path2r_pos_sec), map_wan(wan_p2r,path2_serv_sec,path2r_pos_sec)[1:]) if gerar_link_propriedades(u,v,bits_ag,lr)]
+
+    # --- PATH 3 (SE -> ONS) ---
+    wan_p3, _ = gerar_caminho_wan(tg, "rnp", node_se, node_ons, bits_se)
+    wan_p3r, _ = gerar_caminho_wan_k(tg, "rnp", node_se, node_ons_sec, bits_se, k=2)
+    links3 = []; [links3.append(gerar_link_propriedades(u,v,bits_se,lr)) for u,v in zip(map_wan(wan_p3,path3_pre,path3_pos_pri), map_wan(wan_p3,path3_pre,path3_pos_pri)[1:]) if gerar_link_propriedades(u,v,bits_se,lr)]
+    links3r = []; [links3r.append(gerar_link_propriedades(u,v,bits_se,lr)) for u,v in zip(map_wan(wan_p3r,path3_pre,path3r_sec_pos), map_wan(wan_p3r,path3_pre,path3r_sec_pos)[1:]) if gerar_link_propriedades(u,v,bits_se,lr)]
+
+    # --- PATH 4 (SE -> AG -> ONS) ---
+    links4 = links1 + links2
+    links4r = links1r + links2r
+
+    # --- DETALHAMENTO FÍSICO (PRINTS) ---
+    print(f"\n--- Detalhamento Físico PATH 1 (SE->AG) ---")
+    print("Links 1 (Primário):");
+    for lk in links1: print(lk)
+    print("\nLinks 1r (Secundário):");
+    for lk in links1r: print(lk)
+
+    print(f"\n--- Detalhamento Físico PATH 2 (AG->ONS) ---")
+    print("Links 2 (Primário):");
+    for lk in links2: print(lk)
+    print("\nLinks 2r (Secundário):");
+    for lk in links2r: print(lk)
+
+    print(f"\n--- Detalhamento Físico PATH 3 (SE->ONS) ---")
+    print("Links 3 (Primário):");
+    for lk in links3: print(lk)
+    print("\nLinks 3r (Secundário):");
+    for lk in links3r: print(lk)
+
+    print(f"\n--- Detalhamento Físico PATH 4 (SE->AG->ONS) ---")
+    print("Links 4 (Primário):");
+    for lk in links4: print(lk)
+    print("\nLinks 4r (Secundário):");
+    for lk in links4r: print(lk)
+
+
+    evs_global = [random.random() for _ in range(MAX_FAIL_CHECKS * 5)]
+    evs_secundario = [random.random() for _ in range(MAX_FAIL_CHECKS * 5)]
+
+    # --- SIMULAÇÃO PATH 1 ---
+    print("\n" + "="*60 + "\n >>> SIMULAÇÃO PATH 1 (SE -> AG) <<<\n" + "="*60)
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p1["Trad"].append(simular_tradicional(links1, REQLAT_MAX, evs_global, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p1["Trad_Res"].append(simular_replicacao_tradicional(links1, links1r, REQLAT_MAX, evs_global, evs_secundario, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p1["SDN"].append(simular_sdn(links1, REQLAT_MAX, evs_global, lat_se_ctrl, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p1["SDN_Res"].append(simular_replicacao_sdn(links1, links1r, REQLAT_MAX, evs_global, evs_secundario, lat_se_ctrl, GLOBAL_INT_TO, verbose=True))
+
+    # --- SIMULAÇÃO PATH 2 ---
+    print("\n" + "="*60 + "\n >>> SIMULAÇÃO PATH 2 (AG -> ONS) <<<\n" + "="*60)
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p2["Trad"].append(simular_tradicional(links2, REQLAT_MAX, evs_global, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p2["Trad_Res"].append(simular_replicacao_tradicional(links2, links2r, REQLAT_MAX, evs_global, evs_secundario, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p2["SDN"].append(simular_sdn(links2, REQLAT_MAX, evs_global, lat_ag_ctrl, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p2["SDN_Res"].append(simular_replicacao_sdn(links2, links2r, REQLAT_MAX, evs_global, evs_secundario, lat_ag_ctrl, GLOBAL_INT_TO, verbose=True))
+
+    # --- SIMULAÇÃO PATH 3 ---
+    print("\n" + "="*60 + "\n >>> SIMULAÇÃO PATH 3 (SE -> ONS) <<<\n" + "="*60)
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p3["Trad"].append(simular_tradicional(links3, REQLAT_MAX, evs_global, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p3["Trad_Res"].append(simular_replicacao_tradicional(links3, links3r, REQLAT_MAX, evs_global, evs_secundario, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p3["SDN"].append(simular_sdn(links3, REQLAT_MAX, evs_global, lat_se_ctrl, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p3["SDN_Res"].append(simular_replicacao_sdn(links3, links3r, REQLAT_MAX, evs_global, evs_secundario, lat_se_ctrl, GLOBAL_INT_TO, verbose=True))
+
+
+    # --- SIMULAÇÃO PATH 4 ---
+    print("\n" + "="*60 + "\n >>> SIMULAÇÃO PATH 4 (SE -> AG -> ONS) <<<\n" + "="*60)
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p4["Trad"].append(simular_tradicional(links4, REQLAT_MAX, evs_global, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p4["Trad_Res"].append(simular_replicacao_tradicional(links4, links4r, REQLAT_MAX, evs_global, evs_secundario, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p4["SDN"].append(simular_sdn(links4, REQLAT_MAX, evs_global, lat_se_ctrl, GLOBAL_INT_TO, verbose=True))
+    
+    black_hole_state = {'u': None, 'v': None, 'active_until': 0.0}
+    res_p4["SDN_Res"].append(simular_replicacao_sdn(links4, links4r, REQLAT_MAX, evs_global, evs_secundario, lat_se_ctrl, GLOBAL_INT_TO, verbose=True))
+
+    c += 1
+
+print("\n--- RESULTADOS FINAIS (Latência, Perdas, Violação) ---")
+for p_name, res in [("Path 1 (SE->AG)", res_p1), ("Path 2 (AG->ONS)", res_p2), ("Path 3 (SE->ONS)", res_p3), ("Path 4 (SE->AG->ONS)", res_p4)]:
+    print(f"\n>>> {p_name}")
+    print(f"  Tradicional:         {res['Trad'][-1]}")
+    print(f"  Tradicional + Resiliência:     {res['Trad_Res'][-1]}")
+    print(f"  SDN:                 {res['SDN'][-1]}")
+    print(f"  SDN + Resiliência:       {res['SDN_Res'][-1]}")
+
+
+# =================================================================
+# --- CÁLCULO DE MÉTRICAS FINAIS COM INTERVALO DE CONFIANÇA ---
+# =================================================================
+
+print("\n" + "="*120)
+print(f" >>> RELATÓRIO FINAL CONSOLIDADO ({NUM_RODADAS} Rodadas)")
+print(f" >>> Intervalo de Confiança: 95% (T-Student)")
+print("="*120)
+
+paths_results = [
+    ("Path 1 (SE->AG)", res_p1),
+    ("Path 2 (AG->ONS)", res_p2),
+    ("Path 3 (SE->ONS)", res_p3),
+    ("Path 4 (SE->AG->ONS)", res_p4)
+]
+
+# Função Auxiliar para calcular Média e Margem de Erro (IC)
+def calc_stats(data_array, confidence=0.95):
+    # Se não houver dados suficientes, retorna 0
+    if len(data_array) < 2: return np.mean(data_array), 0.0
+    
+    n = len(data_array)
+    mean = np.mean(data_array)
+    sem = st.sem(data_array) # Erro Padrão da Média
+    
+    # Margem de erro usando T-Student
+    # st.t.ppf calcula o valor crítico T para a confiança desejada
+    margin = sem * st.t.ppf((1 + confidence) / 2., n-1)
+    
+    return mean, margin
+
+for p_name, res_dict in paths_results:
+    print(f"\n--- {p_name} ---")
+    # Cabeçalho Ajustado
+    print(f"{'CENÁRIO':<15} | {'DELAY(ms)':<22} | {'JITTER(ms)':<22} | {'PERDAS(%)':<22} | {'DISPONIB.(%)':<22}")
+    print("-" * 120)
+
+    for mode in ["Trad", "Trad_Res", "SDN", "SDN_Res"]:
+        data = res_dict[mode]
+        
+        if not data:
+            print(f"{mode:<15} | N/A")
+            continue
+
+        # Extração dos dados brutos das 1000 rodadas
+        # A estrutura de 'd' é [TempoTotal, Perdas, Violou?, TempoIndisponivel]
+        raw_times = np.array([d[0] for d in data])
+        raw_losses = np.array([d[1] for d in data])
+        
+        # Proteção: Se por algum motivo o código antigo rodou e não tem o índice 3, assume 0.0
+        try:
+            raw_unavailable = np.array([d[3] for d in data])
+        except IndexError:
+            raw_unavailable = np.zeros_like(raw_times)
+
+        # --- 1. Estatística de DELAY (ms) ---
+        arr_delay = raw_times * 1000
+        mean_delay, ci_delay = calc_stats(arr_delay, confidence=0.95)
+
+        # --- 2. Estatística de JITTER (ms) ---
+        # Jitter calculado pela diferença absoluta entre rodadas consecutivas
+        if len(arr_delay) > 1:
+            arr_jitter = np.abs(np.diff(arr_delay))
+            mean_jitter, ci_jitter = calc_stats(arr_jitter, confidence=0.95)
+        else:
+            mean_jitter, ci_jitter = 0.0, 0.0
+
+        # --- 3. Estatística de PERDAS (%) ---
+        # Cálculo: Perda na rodada = Perdas / (Perdas + 1 Sucesso)
+        # Se raw_losses for 0, perda é 0%. Se for 1, perda é 50% (1 falha, 1 sucesso), etc.
+        # Nota: Dependendo da lógica exata, o denominador é 'Tentativas'. 
+        # Assumindo que 1 sucesso sempre ocorre no final ou o pacote chega:
+        total_attempts_per_round = raw_losses + 1 
+        arr_loss_perc = (raw_losses / total_attempts_per_round) * 100
+        mean_loss, ci_loss = calc_stats(arr_loss_perc, confidence=0.95)
+
+        # --- 4. Estatística de DISPONIBILIDADE (%) ---
+        # Disp = ((TempoTotal - TempoIndisponivel) / TempoTotal) * 100
+        with np.errstate(divide='ignore', invalid='ignore'):
+            arr_avail_perc = ((raw_times - raw_unavailable) / raw_times) * 100
+            # Corrige NaN/Inf caso tempo seja 0 (improvável, mas seguro)
+            arr_avail_perc = np.nan_to_num(arr_avail_perc, nan=0.0)
+        
+        mean_avail, ci_avail = calc_stats(arr_avail_perc, confidence=0.95)
+
+        # --- IMPRESSÃO FORMATADA ---
+        # Formata como "Média ±Margem"
+        str_delay = f"{mean_delay:.2f} ±{ci_delay:.2f}"
+        str_jitter = f"{mean_jitter:.2f} ±{ci_jitter:.2f}"
+        str_loss = f"{mean_loss:.2f} ±{ci_loss:.2f}"
+        str_avail = f"{mean_avail:.2f} ±{ci_avail:.2f}"
+
+        print(f"{mode:<15} | {str_delay:<22} | {str_jitter:<22} | {str_loss:<22} | {str_avail:<22}")
+
+print("\n" + "="*120)
+print(" >>> PARÂMETROS DE REDE CALIBRADOS")
+print("="*120)
+print(f" RTT Médio Global Estimado: {GLOBAL_RTT_MEDIO * 1000:.2f} ms")
+print(f" Intervalo de Timeout (4x): {GLOBAL_INT_TO * 1000:.2f} ms")
+print("="*120)
