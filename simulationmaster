@@ -106,7 +106,7 @@ class TopologyGenerator():
         self.network.add_edge('DF', 'GO', weight=175, bandwidth=15840.0)
         self.network.add_edge('CE', 'SP', weight=2865, bandwidth=294360.0)
         self.network.add_edge('DF', 'MG', weight=628, bandwidth=94010.0)
-        self.network.add_edge('MT', 'DF', weight=1318, bandwidth=98975.77)
+        self.network.add_edge('MT', 'DF', weight=880, bandwidth=98975.77)
         self.network.add_edge('DF', 'TO', weight=850, bandwidth=196620.0)
         self.network.add_edge('DF', 'MA', weight=1850, bandwidth=98290.0)
         self.network.add_edge('DF', 'SP', weight=1017, bandwidth=13020.0)
